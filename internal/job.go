@@ -28,6 +28,11 @@ type Job struct {
 	CreatedAt time.Time
 	UpdatedAt atomic.Int64
 }
+type JobResult struct {
+	JobID   string
+	Success bool
+	Err     error
+}
 
 func (j *Job) Transition(to JobState) bool {
 	for {

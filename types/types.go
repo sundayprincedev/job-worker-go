@@ -13,4 +13,6 @@ const (
 	CommissionRateBPS = 2000 // 20.00% in basis points
 )
 
-var UniversalJobTimeout = 100 * time.Millisecond
+const UniversalJobTimeout = 100 * time.Millisecond
+
+const WorkerCount int = 4

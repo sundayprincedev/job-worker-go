@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,9 +70,13 @@ func (wp *WorkerPool) Start() {
 			defer wp.Wg.Done()
 			for job := range wp.JobChan {
 				if err := executeJob(wp.Ctx, job); err != nil {
-					if stateChanged := job.Transition(internal.StateFailed); !stateChanged {
-						err := internal.NewTransitionError(job.ID, int32(job.State), internal.StateFailed, "unexpected state", nil)
+					from := internal.JobState(job.State.Load())
+					if ok := job.Transition(internal.StateFailed); !ok {
+						err := internal.NewTransitionError(job.ID, from, internal.StateFailed, "unexpected state", nil)
+						wp.ErrChan <- *internal.NewJobError(job.ID, "unexpected transition state", err)
 					}
+
+					wp.ErrChan <- *internal.NewJobError(job.ID, "job failed", err)
 				}
 			}
 		}()
@@ -86,5 +91,6 @@ func (wp *WorkerPool) Start() {
 }
 
 func executeJob(ctx context.Context, job *internal.Job) error {
+	//change job state to running before any execution
 	return nil
 }
