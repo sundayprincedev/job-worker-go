@@ -91,6 +91,11 @@ func (wp *WorkerPool) Start() {
 }
 
 func executeJob(ctx context.Context, job *internal.Job) error {
-	//change job state to running before any execution
+	from := internal.JobState(job.State.Load())
+	if ok := job.Transition(internal.StateRunning); !ok {
+		err := internal.NewTransitionError(job.ID, from, internal.StateRunning, "unexpected state", nil)
+		return err
+	}
+
 	return nil
 }
