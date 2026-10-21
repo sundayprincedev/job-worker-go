@@ -1,8 +1,8 @@
 # Job Worker Go
 
-Concurrency skeleton for double-entry ledger systems. Built to survive Black Friday volume, grid failures, and regulatory audits.
+Concurrency skeleton for double-entry ledger systems.
 
-## Current State (Oct 19, 2026)
+## Current State (Oct 21, 2026)
 
 ✅ Atomic job state machine with CAS transitions  
 ✅ Deterministic payment payload (MerchantID, Amount, CustomerRef)  
@@ -14,6 +14,24 @@ Concurrency skeleton for double-entry ledger systems. Built to survive Black Fri
    1. Debit suspense account (amount + commission)  
    2. Credit merchant account  
    3. Credit house commission account (20% fixed rate)  
+✅ Jobs loaded from a JSON file (`jobs.json`, 10 sample payments) via `reader.go`  
+✅ Simulated processor failures (fraud flagged, insufficient funds) returned as typed errors  
+✅ CLI demo with live log streaming and SIGINT/SIGTERM handling  
+✅ Tests for the reader, state transitions, cancellation and failure paths (run with `-race`)  
+
+## Running It
+
+```bash
+go run . -n 5                      # run the first 5 jobs
+go run . -n all                    # run everything in jobs.json
+go run . -fail-rate 0.5            # processor declines half the jobs
+go run . -inject-signal 60ms       # send SIGINT mid-run to watch the shutdown
+go test -race ./...
+```
+
+Flags: `-file` (jobs file), `-n` (count or `all`), `-fail-rate` (0 to 1, default 0.25), `-inject-signal` (delay, off by default).
+
+Heads up: the pool has a 100ms timeout and some simulated work takes longer, so a few jobs will time out even with `-fail-rate 0`. That's expected to see context deadline hits as it should
 
 ## Architecture Decisions
 
@@ -24,8 +42,8 @@ Concurrency skeleton for double-entry ledger systems. Built to survive Black Fri
 
 ## What's Next
 
-- [ ] Worker pool lifecycle with bounded channels and SIGTERM drain tests 
-- [ ] Crash window handling between ledger commit and ACK send 
+- [ ] Worker pool lifecycle with bounded channels and a proper SIGTERM drain test 
+- [ ] Crash window handling between ledger commit and ACK send
 - [ ] Retry boundary test proving no double-posting after process restart  
 - [ ] Append-only journal integration for durable state recovery  
 - [ ] Race detector validation under concurrent retries + injected panics  

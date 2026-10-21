@@ -1,0 +1,12 @@
+[
+  {"merchant_acc": "MERCH_001", "user_acc": "USER_101", "amount": 15000,  "customer_ref": "REF-A001"},
+  {"merchant_acc": "MERCH_002", "user_acc": "USER_102", "amount": 250000, "customer_ref": "REF-A002"},
+  {"merchant_acc": "MERCH_001", "user_acc": "USER_103", "amount": 9900,   "customer_ref": "REF-A003"},
+  {"merchant_acc": "MERCH_003", "user_acc": "USER_104", "amount": 120000, "customer_ref": "REF-A004"},
+  {"merchant_acc": "MERCH_004", "user_acc": "USER_105", "amount": 500,    "customer_ref": "REF-A005"},
+  {"merchant_acc": "MERCH_002", "user_acc": "USER_106", "amount": 78000,  "customer_ref": "REF-A006"},
+  {"merchant_acc": "MERCH_005", "user_acc": "USER_107", "amount": 33333,  "customer_ref": "REF-A007"},
+  {"merchant_acc": "MERCH_003", "user_acc": "USER_108", "amount": 1000000,"customer_ref": "REF-A008"},
+  {"merchant_acc": "MERCH_004", "user_acc": "USER_109", "amount": 4200,   "customer_ref": "REF-A009"},
+  {"merchant_acc": "MERCH_005", "user_acc": "USER_110", "amount": 61000,  "customer_ref": "REF-A010"}
+]

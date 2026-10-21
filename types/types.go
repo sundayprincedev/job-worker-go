@@ -3,7 +3,8 @@ package types
 import "time"
 
 type PaymentPayload struct {
-	MerchantID  string
+	MerchantAcc string
+	UserAcc     string
 	Amount      int64
 	CustomerRef string
 }

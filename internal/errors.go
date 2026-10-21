@@ -17,6 +17,7 @@ type JobError struct {
 	JobID     string
 	Reason    string
 	Err       error
+	Stack     string
 	Timestamp time.Time
 }
 
@@ -39,6 +40,34 @@ func NewJobError(jobID, reason string, err error) *JobError {
 		Timestamp: time.Now(),
 	}
 }
+
+func NewJobErrorWithStack(jobID, reason string, err error, stack string) *JobError {
+	return &JobError{
+		JobID:     jobID,
+		Reason:    reason,
+		Err:       err,
+		Stack:     stack,
+		Timestamp: time.Now(),
+	}
+}
+
+type ProcessorError struct {
+	Processor string
+	Reason    string
+	Err       error
+	Stack     string
+	Timestamp time.Time
+	JobID     string
+}
+
+func (e *ProcessorError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %s: %v", e.Processor, e.Reason, e.Err)
+	}
+	return fmt.Sprintf("%s: %s", e.Processor, e.Reason)
+}
+
+func (e *ProcessorError) Unwrap() error { return e.Err }
 
 type TransitionError struct {
 	JobID     string
