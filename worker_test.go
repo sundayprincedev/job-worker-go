@@ -24,7 +24,22 @@ func payload(ref string, amount int64) types.PaymentPayload {
 
 func newJob(ref string) *internal.Job {
 	p := payload(unique(ref), 100)
-	return &internal.Job{ID: generateJobId(p), Payload: p, Timeout: types.UniversalJobTimeout}
+	return &internal.Job{ID: generateJobId(p), Payload: p, Timeout: types.UniversalJobTimeout, CreatedAt: time.Now()}
+}
+
+// resetRegistry empties the package-global registry so a test sees only its own jobs.
+func resetRegistry(t *testing.T) {
+	t.Helper()
+	clear := func() {
+		JobRegistry.Range(func(k, _ any) bool { JobRegistry.Delete(k); return true })
+	}
+	clear()
+	t.Cleanup(clear)
+}
+
+func registered(j *internal.Job) bool {
+	v, ok := JobRegistry.Load(j.ID)
+	return ok && v.(*internal.Job) == j
 }
 
 func writeFile(t *testing.T, content string) string {
@@ -90,33 +105,89 @@ func TestReadPayloadsErrors(t *testing.T) {
 }
 
 func TestReadJobsSkipsDuplicates(t *testing.T) {
+	resetRegistry(t)
 	ref := unique("dup")
 	path := writeFile(t, `[
 		{"merchant_acc":"M","amount":1,"customer_ref":"`+ref+`"},
 		{"merchant_acc":"M","amount":1,"customer_ref":"`+ref+`"}
 	]`)
-	jobs, err := ReadJobs(path)
+	in, err := ReadJobs(path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 1 {
-		t.Fatalf("got %d jobs, want 1 after dedup", len(jobs))
+	if len(in.Fresh) != 1 || len(in.Existing) != 0 {
+		t.Fatalf("fresh=%d existing=%d, want 1 and 0", len(in.Fresh), len(in.Existing))
 	}
 }
 
-func TestSelectJobs(t *testing.T) {
-	jobs := []*internal.Job{newJob("a"), newJob("b"), newJob("c")}
+func TestReadJobsLimit(t *testing.T) {
+	resetRegistry(t)
+	in, err := ReadJobs("jobs.json", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.Fresh) != 3 {
+		t.Fatalf("got %d fresh jobs, want 3", len(in.Fresh))
+	}
+	n := 0
+	JobRegistry.Range(func(_, _ any) bool { n++; return true })
+	if n != 3 {
+		t.Fatalf("registry holds %d jobs, want only the 3 requested", n)
+	}
+}
+
+// The loaded flag from LoadOrStore, not the job's state, decides the path.
+func TestReadJobsRoutesByLoadedFlag(t *testing.T) {
+	resetRegistry(t)
+	path := writeFile(t, `[{"merchant_acc":"M","amount":1,"customer_ref":"`+unique("route")+`"}]`)
+
+	first, err := ReadJobs(path, 0)
+	if err != nil || len(first.Fresh) != 1 || len(first.Existing) != 0 {
+		t.Fatalf("first read: %v fresh=%d existing=%d", err, len(first.Fresh), len(first.Existing))
+	}
+
+	// Still Pending, but already registered: must go to the resolver, not the pool.
+	second, err := ReadJobs(path, 0)
+	if err != nil || len(second.Fresh) != 0 || len(second.Existing) != 1 {
+		t.Fatalf("second read: %v fresh=%d existing=%d", err, len(second.Fresh), len(second.Existing))
+	}
+	if second.Existing[0] != first.Fresh[0] {
+		t.Fatal("re-reading must return the registered job, not a new one")
+	}
+}
+
+func TestConcurrentSubmissionsCreateOnce(t *testing.T) {
+	resetRegistry(t)
+	p := payload(unique("race"), 5)
+
+	const callers = 16
+	created := make(chan bool, callers)
+	for range callers {
+		go func() { _, loaded := LoadOrStore(p); created <- !loaded }()
+	}
+	var creators int
+	for range callers {
+		if <-created {
+			creators++
+		}
+	}
+	if creators != 1 {
+		t.Fatalf("%d callers believed they created the job, want exactly 1", creators)
+	}
+}
+
+func TestParseCount(t *testing.T) {
 	for _, tc := range []struct {
 		n    string
 		want int
 		err  bool
 	}{
-		{"all", 3, false}, {"2", 2, false}, {"99", 3, false},
+		{"all", 0, false}, {"2", 2, false}, {"99", 99, false},
 		{"0", 0, true}, {"-1", 0, true}, {"abc", 0, true},
 	} {
-		got, err := selectJobs(jobs, tc.n)
-		if (err != nil) != tc.err || len(got) != tc.want {
-			t.Errorf("selectJobs(%q) = %d, err=%v; want %d, err=%v", tc.n, len(got), err, tc.want, tc.err)
+		got, err := parseCount(tc.n)
+		if (err != nil) != tc.err || got != tc.want {
+			t.Errorf("parseCount(%q) = %d, err=%v; want %d, err=%v", tc.n, got, err, tc.want, tc.err)
 		}
 	}
 }
@@ -269,6 +340,195 @@ func TestRunJobsReportsSimulatedFailures(t *testing.T) {
 	for _, j := range jobs {
 		if s := internal.JobState(j.State.Load()); s != internal.StateFailed {
 			t.Errorf("job %s state = %d, want failed", j.ID, s)
+		}
+	}
+}
+
+// ---- resolver ----
+
+func testResolver(staleAfter time.Duration) *Resolver {
+	r := NewResolver()
+	r.StaleAfter = staleAfter
+	r.PollEvery = 2 * time.Millisecond
+	return r
+}
+
+func jobInState(ref string, s internal.JobState, idle time.Duration) *internal.Job {
+	j := newJob(unique(ref))
+	j.State.Store(int32(s))
+	j.CreatedAt = time.Now().Add(-idle)
+	j.UpdatedAt.Store(time.Now().Add(-idle).UnixNano())
+	return j
+}
+
+func TestResolveAlreadyTerminal(t *testing.T) {
+	for _, s := range []internal.JobState{internal.StateCompleted, internal.StateFailed, internal.StateCanceled} {
+		j := jobInState("term", s, time.Hour)
+		res := testResolver(time.Millisecond).Resolve(context.Background(), j)
+		if res.To != s || res.Err != nil {
+			t.Errorf("state %d: got To=%d Err=%v, want untouched", s, res.To, res.Err)
+		}
+	}
+}
+
+func TestResolvePendingNeverPickedUpFails(t *testing.T) {
+	j := jobInState("pend", internal.StatePending, time.Hour)
+	j.CreatedAt = time.Now().Add(-time.Hour)
+	res := testResolver(20*time.Millisecond).Resolve(context.Background(), j)
+	if res.To != internal.StateFailed || !errors.Is(res.Err, internal.ErrStaleJob) {
+		t.Fatalf("got To=%d Err=%v, want failed with ErrStaleJob", res.To, res.Err)
+	}
+}
+
+func TestResolvePendingWaitsForCreator(t *testing.T) {
+	j := jobInState("pend-live", internal.StatePending, 0)
+	time.AfterFunc(20*time.Millisecond, func() { j.Transition(internal.StateCompleted) })
+	res := testResolver(2*time.Second).Resolve(context.Background(), j)
+	if res.To != internal.StateCompleted || res.Err != nil {
+		t.Fatalf("got To=%d Err=%v, want the creator's completion respected", res.To, res.Err)
+	}
+}
+
+func TestResolveCommittedIsCompletedNotRerun(t *testing.T) {
+	j := jobInState("commit", internal.StateCommitted, time.Hour)
+	res := testResolver(time.Millisecond).Resolve(context.Background(), j)
+	if res.To != internal.StateCompleted || res.Err != nil {
+		t.Fatalf("got To=%d Err=%v, want completed with no error", res.To, res.Err)
+	}
+	if internal.JobState(j.State.Load()) != internal.StateCompleted {
+		t.Fatal("job state must be completed")
+	}
+}
+
+func TestResolveStaleRunningFails(t *testing.T) {
+	j := jobInState("stale", internal.StateRunning, time.Hour)
+	res := testResolver(50*time.Millisecond).Resolve(context.Background(), j)
+	if res.To != internal.StateFailed || !errors.Is(res.Err, internal.ErrStaleJob) {
+		t.Fatalf("got To=%d Err=%v, want failed with ErrStaleJob", res.To, res.Err)
+	}
+	// A worker that wakes up late must lose the race, not resurrect the job.
+	if j.Transition(internal.StateCompleted) {
+		t.Fatal("late worker must not be able to complete a job the resolver failed")
+	}
+}
+
+func TestResolveWaitsForLiveWorker(t *testing.T) {
+	j := jobInState("live", internal.StateRunning, 0)
+	time.AfterFunc(20*time.Millisecond, func() { j.Transition(internal.StateCompleted) })
+
+	res := testResolver(2*time.Second).Resolve(context.Background(), j)
+	if res.To != internal.StateCompleted || res.Err != nil {
+		t.Fatalf("got To=%d Err=%v, want the worker's completion respected", res.To, res.Err)
+	}
+}
+
+func TestResolveStopsWaitingOnCancel(t *testing.T) {
+	j := jobInState("cancel", internal.StateRunning, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	res := testResolver(time.Hour).Resolve(ctx, j)
+	if !errors.Is(res.Err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", res.Err)
+	}
+	if internal.JobState(j.State.Load()) != internal.StateRunning {
+		t.Fatal("an abandoned wait must not change the job")
+	}
+}
+
+func register(t *testing.T, j *internal.Job) {
+	t.Helper()
+	if _, loaded := JobRegistry.LoadOrStore(j.ID, j); loaded {
+		t.Fatalf("job %s was already registered", j.ID)
+	}
+}
+
+func TestDispatchTwoWayFlowAndEjection(t *testing.T) {
+	resetRegistry(t)
+	setFailureRate(t, 0)
+
+	fresh := newJob(unique("fresh"))
+	stale := jobInState("leftover", internal.StateRunning, time.Hour)
+	done := jobInState("done", internal.StateCompleted, time.Hour)
+	for _, j := range []*internal.Job{fresh, stale, done} {
+		register(t, j)
+	}
+
+	var resolved int
+	res := Dispatch(context.Background(),
+		Intake{Fresh: []*internal.Job{fresh}, Existing: []*internal.Job{stale, done}},
+		testResolver(20*time.Millisecond),
+		Observer{OnResolve: func(Resolution) { resolved++ }})
+
+	if res.Fresh != 1 || len(res.Resolutions) != 2 || resolved != 2 || res.Swept != 0 {
+		t.Fatalf("fresh=%d resolutions=%d callbacks=%d swept=%d, want 1/2/2/0", res.Fresh, len(res.Resolutions), resolved, res.Swept)
+	}
+	if internal.JobState(stale.State.Load()) != internal.StateFailed {
+		t.Error("stale job must be failed by the resolver")
+	}
+	for _, j := range []*internal.Job{fresh, stale, done} {
+		if s := internal.JobState(j.State.Load()); !isTerminal(s) {
+			t.Errorf("job %s ended in state %d, want terminal", j.ID, s)
+		}
+		if registered(j) {
+			t.Errorf("job %s is terminal but still in the registry", j.ID)
+		}
+	}
+}
+
+func TestDispatchSweepsLeftoversNobodySubmitted(t *testing.T) {
+	resetRegistry(t)
+	setFailureRate(t, 0)
+
+	orphan := jobInState("orphan", internal.StateCommitted, time.Hour)
+	register(t, orphan)
+
+	res := Dispatch(context.Background(), Intake{}, testResolver(20*time.Millisecond), Observer{})
+	if res.Swept != 1 || len(res.Resolutions) != 1 {
+		t.Fatalf("swept=%d resolutions=%d, want 1/1", res.Swept, len(res.Resolutions))
+	}
+	if internal.JobState(orphan.State.Load()) != internal.StateCompleted || registered(orphan) {
+		t.Fatal("swept committed job must be completed and ejected")
+	}
+}
+
+func TestEjectOnlyWhenTerminalAndOnlyThatJob(t *testing.T) {
+	resetRegistry(t)
+	j := newJob(unique("eject"))
+	register(t, j)
+
+	if ejectIfTerminal(j) || !registered(j) {
+		t.Fatal("a pending job must stay in the registry")
+	}
+	j.Transition(internal.StateRunning)
+	if ejectIfTerminal(j) || !registered(j) {
+		t.Fatal("a running job must stay in the registry")
+	}
+
+	j.Transition(internal.StateCompleted)
+	other := &internal.Job{ID: j.ID} // same ID, different job
+	other.State.Store(int32(internal.StateCompleted))
+	if ejectIfTerminal(other) || !registered(j) {
+		t.Fatal("ejecting a different job with the same ID must not evict the registered one")
+	}
+	if !ejectIfTerminal(j) || registered(j) {
+		t.Fatal("a terminal job must be ejected")
+	}
+}
+
+func TestPoolPathEjectsTerminalJobs(t *testing.T) {
+	resetRegistry(t)
+	setFailureRate(t, 1) // every job fails fast, so all end terminal
+	jobs := []*internal.Job{newJob(unique("pe")), newJob(unique("pe"))}
+	for _, j := range jobs {
+		register(t, j)
+	}
+	if err := RunJobs(context.Background(), jobs); err == nil {
+		t.Fatal("expected simulated failures")
+	}
+	for _, j := range jobs {
+		if registered(j) {
+			t.Errorf("job %s finished but was not ejected", j.ID)
 		}
 	}
 }

@@ -44,6 +44,19 @@ func LoadOrStore(payload types.PaymentPayload) (*internal.Job, bool) {
 	return actual.(*internal.Job), loaded
 }
 
+func ejectIfTerminal(job *internal.Job) bool {
+	if job == nil || !isTerminal(internal.JobState(job.State.Load())) {
+		return false
+	}
+	return JobRegistry.CompareAndDelete(job.ID, job)
+}
+
+func ejectByID(id string) {
+	if v, ok := JobRegistry.Load(id); ok {
+		ejectIfTerminal(v.(*internal.Job))
+	}
+}
+
 type WorkerPool struct {
 	JobChan     chan *internal.Job
 	ErrChan     chan internal.JobError

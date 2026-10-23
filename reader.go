@@ -9,8 +9,6 @@ import (
 	"github.com/sundayprincedev/job-worker-go/types"
 )
 
-// jobRecord is the on-disk shape of a job. Job itself holds atomics and
-// derived fields (ID, state), so only the payload is persisted.
 type jobRecord struct {
 	MerchantAcc string `json:"merchant_acc"`
 	UserAcc     string `json:"user_acc"`
@@ -18,7 +16,6 @@ type jobRecord struct {
 	CustomerRef string `json:"customer_ref"`
 }
 
-// ReadPayloads parses a JSON array of job records and validates each one.
 func ReadPayloads(path string) ([]types.PaymentPayload, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -45,22 +42,33 @@ func ReadPayloads(path string) ([]types.PaymentPayload, error) {
 	return payloads, nil
 }
 
-// ReadJobs reads the file and registers each payload through the idempotency
-// registry. Payloads that map to an already-registered job are skipped, so the
-// returned slice never contains the same job twice.
-func ReadJobs(path string) ([]*internal.Job, error) {
+type Intake struct {
+	Fresh    []*internal.Job
+	Existing []*internal.Job
+}
+
+func ReadJobs(path string, limit int) (Intake, error) {
 	payloads, err := ReadPayloads(path)
 	if err != nil {
-		return nil, err
+		return Intake{}, err
+	}
+	if limit > 0 && limit < len(payloads) {
+		payloads = payloads[:limit]
 	}
 
-	jobs := make([]*internal.Job, 0, len(payloads))
+	var in Intake
+	seen := make(map[*internal.Job]struct{}, len(payloads))
 	for _, p := range payloads {
 		job, loaded := LoadOrStore(p)
-		if loaded {
+		if _, dup := seen[job]; dup {
 			continue
 		}
-		jobs = append(jobs, job)
+		seen[job] = struct{}{}
+		if loaded {
+			in.Existing = append(in.Existing, job)
+		} else {
+			in.Fresh = append(in.Fresh, job)
+		}
 	}
-	return jobs, nil
+	return in, nil
 }

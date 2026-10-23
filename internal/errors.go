@@ -11,6 +11,7 @@ var (
 	ErrInsufficientFunds = errors.New("processor declined: insufficient funds")
 	ErrAllFailed         = errors.New("all processors failed or timed out")
 	ErrInvalidTransition = errors.New("invalid job state transition")
+	ErrStaleJob          = errors.New("job made no progress; owning worker presumed lost")
 )
 
 type JobError struct {
